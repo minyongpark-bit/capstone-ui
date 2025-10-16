@@ -1,0 +1,108 @@
+import type { Location } from '@/lib/types';
+
+export const mockLocations: Location[] = [
+    {
+        id: '1',
+        name: '강남구',
+        address: '서울특별시 강남구 강남대로 396',
+        lat: 37.498095,
+        lng: 127.02761,
+        scores: {
+        '100m': { safety: 75, amenities: 95, food: 98, culture: 85, accessibility: 99 },
+        '300m': { safety: 78, amenities: 96, food: 97, culture: 88, accessibility: 98 },
+        '500m': { safety: 80, amenities: 96, food: 96, culture: 90, accessibility: 97 },
+        '1000m': { safety: 82, amenities: 93, food: 95, culture: 92, accessibility: 96 },
+        },
+    },
+    {
+        id: '2',
+        name: '마포구',
+        address: '서울특별시 마포구 양화로 160',
+        lat: 37.557527,
+        lng: 126.92533,
+        scores: {
+        '100m': { safety: 70, amenities: 92, food: 95, culture: 98, accessibility: 95 },
+        '300m': { safety: 72, amenities: 92, food: 96, culture: 97, accessibility: 94 },
+        '500m': { safety: 74, amenities: 93, food: 94, culture: 96, accessibility: 93 },
+        '1000m': { safety: 76, amenities: 90, food: 93, culture: 95, accessibility: 92 },
+        },
+    },
+    {
+        id: '3',
+        name: '중구',
+        address: '서울특별시 중구 세종대로 110',
+        lat: 37.566295,
+        lng: 126.977945,
+        scores: {
+        '100m': { safety: 82, amenities: 90, food: 90, culture: 92, accessibility: 97 },
+        '300m': { safety: 83, amenities: 92, food: 91, culture: 93, accessibility: 97 },
+        '500m': { safety: 84, amenities: 92, food: 92, culture: 93, accessibility: 98 },
+        '1000m': { safety: 85, amenities: 90, food: 92, culture: 94, accessibility: 98 },
+        },
+    },
+    {
+        id: '4',
+        name: '송파구',
+        address: '서울특별시 송파구 올림픽로 240',
+        lat: 37.5133,
+        lng: 127.1001,
+        scores: {
+        '100m': { safety: 78, amenities: 90, food: 92, culture: 84, accessibility: 96 },
+        '300m': { safety: 79, amenities: 92, food: 93, culture: 86, accessibility: 97 },
+        '500m': { safety: 80, amenities: 93, food: 94, culture: 87, accessibility: 98 },
+        '1000m': { safety: 81, amenities: 93, food: 94, culture: 88, accessibility: 98 },
+        },
+    },
+    {
+        id: '5',
+        name: '종로구',
+        address: '서울특별시 종로구 종로 171',
+        lat: 37.5715,
+        lng: 126.9919,
+        scores: {
+        '100m': { safety: 76, amenities: 90, food: 96, culture: 92, accessibility: 95 },
+        '300m': { safety: 77, amenities: 91, food: 96, culture: 93, accessibility: 96 },
+        '500m': { safety: 78, amenities: 92, food: 96, culture: 93, accessibility: 97 },
+        '1000m': { safety: 79, amenities: 92, food: 95, culture: 94, accessibility: 97 },
+        },
+    },
+    {
+        id: '6',
+        name: '광진구',
+        address: '서울특별시 광진구 능동로 110',
+        lat: 37.5407,
+        lng: 127.0709,
+        scores: {
+        '100m': { safety: 74, amenities: 88, food: 94, culture: 87, accessibility: 94 },
+        '300m': { safety: 75, amenities: 90, food: 95, culture: 88, accessibility: 95 },
+        '500m': { safety: 76, amenities: 91, food: 95, culture: 89, accessibility: 96 },
+        '1000m': { safety: 77, amenities: 91, food: 95, culture: 90, accessibility: 96 },
+        },
+    },
+    {
+        id: '7',
+        name: '서대문구',
+        address: '서울특별시 서대문구 신촌역로',
+        lat: 37.5551,
+        lng: 126.9368,
+        scores: {
+        '100m': { safety: 72, amenities: 90, food: 95, culture: 90, accessibility: 93 },
+        '300m': { safety: 73, amenities: 91, food: 95, culture: 91, accessibility: 94 },
+        '500m': { safety: 74, amenities: 92, food: 95, culture: 92, accessibility: 95 },
+        '1000m': { safety: 75, amenities: 92, food: 94, culture: 92, accessibility: 95 },
+        },
+    },
+    {
+        id: '8',
+        name: '영등포구',
+        address: '서울특별시 영등포구 여의대로 108',
+        lat: 37.5219,
+        lng: 126.9246,
+        scores: {
+        '100m': { safety: 85, amenities: 86, food: 85, culture: 86, accessibility: 98 },
+        '300m': { safety: 86, amenities: 87, food: 86, culture: 87, accessibility: 98 },
+        '500m': { safety: 88, amenities: 88, food: 86, culture: 88, accessibility: 99 },
+        '1000m': { safety: 90, amenities: 88, food: 86, culture: 89, accessibility: 99 },
+        },
+    },
+];
