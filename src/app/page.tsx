@@ -27,6 +27,29 @@ export default function Page() {
   const [selected, setSelected] = useState<Location>(mockLocations[0]);
   const [weights, setWeights] = useState<Weights>({ ...DEFAULT_WEIGHTS });
 
+  const [query, setQuery] = useState('');
+  const [searchError, setSearchError] = useState('');
+
+  const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+
+    const q = query.trim();
+    if (!q) return;
+
+    // 이름이나 주소에 검색어가 포함된 첫 번째 위치 찾기
+    const match = mockLocations.find(
+      (loc) =>
+        loc.name.includes(q) ||
+        loc.address.includes(q)
+    );
+
+    if (match) {
+      setSelected(match);   // 선택 지역 바꾸기 → 지도 & 오른쪽 카드가 같이 바뀜
+      setSearchError('');
+    } else {
+      setSearchError('검색 결과가 없습니다. (예: 강남구, 종로구, 중구)');
+    }
+  };
 
   const selectedScore = useMemo(() => selected.scores[radius], [selected, radius]);
   const selectedWeighted = useMemo(() => weightedScore(selectedScore, weights), [selectedScore, weights]);
@@ -56,7 +79,7 @@ export default function Page() {
       <header className="py-20 md:py-28">
         <div className="container mx-auto max-w-6xl px-4 text-center">
           <div className="mx-auto w-12 h-12 rounded-full bg-slate-900/90 text-white flex items-center justify-center mb-5">📍</div>
-          <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight">지역 생활 점수 지도</h1>
+          <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight">동네 지표</h1>
           <p className="mt-4 max-w-2xl mx-auto text-lg text-slate-500">데이터 기반으로 지역을 분석하고, 나만의 기준으로 최적의 장소를 찾아보세요</p>
           <div className="mt-8 flex items-center justify-center gap-3">
             <a href="#map" className="px-5 py-3 rounded-xl bg-slate-900 text-white font-medium shadow hover:bg-slate-800 inline-flex">
@@ -111,6 +134,16 @@ export default function Page() {
       <section className="py-16">
         <div className="container mx-auto max-w-6xl px-4">
           <SectionTitle title="인터랙티브 지역 지도" subtitle="서울시 주요 지역을 클릭하여 상세 정보를 확인하세요" />
+          <form onSubmit={handleSearch} className="mt-4 mb-4 flex flex-col gap-2 md:flex-row md:items-center">
+            <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="예: 강남구, 종로구, 중구..." className="flex-1 rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/80"/>
+            <button type="submit" className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">
+              검색
+            </button>
+          </form>
+
+          {searchError && (
+            <p className="mb-4 text-sm text-red-500">{searchError}</p>
+          )}
           <div id="map" className="grid md:grid-cols-2 gap-6 items-start scroll-mt-24 md:scroll-mt-28">
             <div className="rounded-2xl border shadow-sm overflow-hidden bg-white">
               <MapView locations={mockLocations} selected={selected} radius={radius} weights={weights} onSelect={setSelected} />

@@ -1,6 +1,8 @@
 'use client';
-import { MapContainer, TileLayer, Circle, CircleMarker, Tooltip } from 'react-leaflet';
+import { MapContainer, TileLayer, Circle, CircleMarker, Tooltip, useMap } from 'react-leaflet';
+import { useEffect } from 'react';
 import type { LatLngTuple } from 'leaflet';
+import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { Location, RadiusKey, Weights } from '@/lib/types';
 import { RADIUS_METERS, colorByScore } from '@/lib/constants';
@@ -13,6 +15,20 @@ type Props = {
   weights: Weights;
   onSelect: (loc: Location) => void;
 };
+
+function RecenterOnChange({ selected, radius }: { selected: Location; radius: RadiusKey }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const center = L.latLng(selected.lat, selected.lng);
+
+    const bounds = center.toBounds(RADIUS_METERS[radius]);
+
+    map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17 });
+  }, [map, selected.lat, selected.lng, radius]);
+
+  return null;
+}
 
 export default function MapView({ locations, selected, radius, weights, onSelect }: Props) {
   const selectedCenter: LatLngTuple = [selected.lat, selected.lng];
@@ -60,6 +76,7 @@ export default function MapView({ locations, selected, radius, weights, onSelect
         radius={RADIUS_METERS[radius]}
         pathOptions={{ color: '#fbbf24', fillOpacity: 0.08 }}
       />
+      <RecenterOnChange selected={selected} radius={radius} />
     </MapContainer>
   );
 }
