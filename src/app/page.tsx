@@ -1,304 +1,673 @@
 'use client';
-import React, { useMemo, useState } from 'react';
-import SectionTitle from '@/components/SectionTitle';
-import Stat from '@/components/Stat';
+import React, { useMemo, useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import Chip from '@/components/Chip';
 import RadiusControl from '@/components/RadiusControl';
-import ScoreCard from '@/components/ScoreCard';
 import WeightSliders from '@/components/WeightSliders';
 import RankingList from '@/components/RankingList';
-import { METRIC_LABEL, RADIUS_LIST, METRIC_ICON, colorByScore, SCORE_LEGEND, percentileByScore } from '@/lib/constants';
 import { weightedScore } from '@/lib/scoring';
-import type { Location, MetricKey, RadiusKey, Weights } from '@/lib/types';
+import { METRIC_LABEL, METRIC_ICON, colorByScore, percentileByScore, RADIUS_LIST, RADIUS_METERS, METRIC_KEYS } from '@/lib/constants';
+import type { AddressDetail, Location, MetricKey, RadiusKey, Weights, SubWeights, WeightPreset } from '@/lib/types';
 import { mockLocations } from '@/data/mockLocations';
-import dynamic from 'next/dynamic';
+import type { ServerPoint } from '@/lib/server-types';
+import CategoryPicker from '@/components/CategoryPicker';
+import { loadPresets, savePresets } from '@/lib/presets';
 
-const MapView = dynamic(() => import('@/components/MapView'), {
-  ssr: false,
-  loading: () => (
-    <div className="h-[380px] w-full rounded-xl bg-slate-100 animate-pulse" />
-  ),
-});
+const MapView = dynamic(() => import('@/components/MapView'), { ssr: false });
 
-const DEFAULT_WEIGHTS: Weights = { safety: 20, amenities: 20, food: 20, culture: 20, accessibility: 20 };
+type RdsDetail = {
+  food?: number;
+  medical_lv2?: number;
+  medical_lv3?: number;
+  // 필요 시 다른 키도 추가 가능
+};
+
+const ALL_KEYS: MetricKey[] = [
+  'food','transport','safety','education','price','amenities','medical','special','delivery'
+];
+
+const DEFAULT_WEIGHTS: Weights = {
+  food: 12, transport: 11, safety: 11, education: 11, price: 11,
+  amenities: 11, medical: 11, special: 11, delivery: 11,
+};
+const DEFAULT_SUB_WEIGHTS: SubWeights = {
+  food: { korean: 3, japanese: 3, chinese: 3, western: 2, other: 1 },
+  transport: { subway: 7, bus: 4 },
+  education: { elementary: 4, middle: 4, high: 3 },
+  amenities: { cafe: 6, convenience: 5 },
+  medical: { general: 5, university: 6 },
+  delivery: { r500: 4, r1000: 4, r1500: 3 },
+};
+
+// 반경 → 줌 근사 매핑(서버 로직과 비슷하게)
+const ZOOM_BY_RADIUS: Record<RadiusKey, number> = {
+  '100m': 19, '300m': 18, '500m': 17, '1000m': 16,
+};
+
+// 중심(lat,lng), 거리(m)로 bbox 계산 (west,south,east,north)
+function bboxFromCenter(lat: number, lng: number, meters: number) {
+  const dLat = meters / 111320; // 위도 1도 ≈ 111.32km
+  const dLng = meters / (111320 * Math.cos((lat * Math.PI) / 180) || 1);
+  const west = lng - dLng;
+  const south = lat - dLat;
+  const east = lng + dLng;
+  const north = lat + dLat;
+  return [west, south, east, north] as const;
+}
+
+// /api/scores 응답을 유연하게 표준화(배열/GeoJSON/객체 등)
+function normalizeScoresPayload(raw: any): ServerPoint[] {
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.items)) return raw.items;
+  if (Array.isArray(raw?.points)) return raw.points;
+  if (Array.isArray(raw?.features)) {
+    return raw.features.map((f: any) => ({
+      id: f.id,
+      lat: f.geometry?.coordinates?.[1],
+      lng: f.geometry?.coordinates?.[0],
+      score: Number(f.properties?.score ?? 0),
+      medical_lv2: Number(f.properties?.medical_lv2 ?? 0),
+      medical_lv3: Number(f.properties?.medical_lv3 ?? 0),
+    }));
+  }
+  // 단일 객체일 수도 있음
+  if (raw && typeof raw === 'object' && 'lat' in raw && 'lng' in raw) return [raw as ServerPoint];
+  return [];
+}
+
+const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
+
+function DetailRows({
+  metric,
+  rds,
+}: {
+  metric: MetricKey;
+  rds: RdsDetail | null;
+}) {
+  type Item = { label: string; value?: number };
+  const items: Item[] = [];
+
+  if (metric === 'medical') {
+    items.push({ label: '종합병원(2차)', value: rds?.medical_lv2 });
+    items.push({ label: '대학병원(3차)', value: rds?.medical_lv3 });
+  } else if (metric === 'food') {
+    // 서버가 세부 항목을 주면 여기에 추가: rds?.food_korean 등
+    items.push({ label: '음식점(종합)', value: rds?.food });
+  }
+
+  const rows = items.filter(i => typeof i.value === 'number');
+
+  if (!rows.length) {
+    return (
+      <div className="mt-2 rounded-lg bg-slate-50 border p-3 text-xs text-slate-500">
+        이 카테고리의 세부 데이터는 아직 없습니다.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border p-3 bg-slate-50">
+      {rows.map(({ label, value }) => (
+        <div key={label} className="flex items-center justify-between py-1">
+          <span className="text-sm">{label}</span>
+          <span className="font-semibold" style={{ color: colorByScore(value!) }}>
+            {Math.round(value!)}점
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const mixByWeights = (values: number[], weights: number[]) => {
+  const wsum = weights.reduce((a,b)=>a+b, 0);
+  if (wsum <= 0 || values.length === 0) return undefined;
+  let s = 0;
+  for (let i = 0; i < values.length; i++) s += values[i] * (weights[i] / wsum);
+  return Math.round(s);
+};
 
 export default function Page() {
-  const [radius, setRadius] = useState<RadiusKey>('500m');
+  const [radius, setRadius] = useState<RadiusKey>('1000m');
   const [selected, setSelected] = useState<Location>(mockLocations[0]);
-  const [weights, setWeights] = useState<Weights>({ ...DEFAULT_WEIGHTS });
-
+  const [tab, setTab] = useState<'weights' | 'ranking'>('weights');
   const [query, setQuery] = useState('');
-  const [searchError, setSearchError] = useState('');
+  const [detail, setDetail] = useState<AddressDetail | null>(null);
+  const [searchError, setSearchError] = useState<string>('');
+  const [rdsDetail, setRdsDetail] = useState<RdsDetail | null>(null);
+  const [expanded, setExpanded] = useState<MetricKey | null>(null);
+  const METRIC_ORDER: MetricKey[] = [
+    'food','transport','safety','education','price',
+    'amenities','medical','special','delivery'
+  ];
+  const [activeKeys, setActiveKeys] = useState<MetricKey[]>(['food','medical']);
+  const [expandedKey, setExpandedKey] = useState<MetricKey | null>(null);
+  const [presets, setPresets] = useState<WeightPreset[]>([]);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [presetName, setPresetName] = useState('나의 프리셋');
 
-  const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
+  // 정규화 함수: activeKeys 기준으로 100% 재분배, 나머지는 0
+  const normalizeTo100 = React.useCallback((w: Weights) => {
+    const keys = activeKeys.length ? activeKeys : METRIC_KEYS; // 최소 안전장치
+    const s = keys.reduce((acc,k)=> acc + (w[k] ?? 0), 0) || 1;
+    const next: Weights = { ...w };
+    keys.forEach(k => { next[k] = Math.round((w[k] ?? 0) * 100 / s); });
+    METRIC_KEYS.filter(k => !keys.includes(k)).forEach(k => { next[k] = 0; });
+    return next;
+  }, [activeKeys]);
+
+  const normalizeToTotal = <T extends Record<string, number>>(o: T, total: number): T => {
+    const cur = Object.values(o).reduce((a, b) => a + b, 0) || 1;
+    const ratio = total / cur;
+    const scaled = Object.fromEntries(
+      Object.entries(o).map(([k, v]) => [k, Math.round(v * ratio)])
+    ) as T;
+    // 반올림 오차 보정(합이 정확히 total 되게 1~2점 가산/감산)
+    const diff = total - Object.values(scaled).reduce((a, b) => a + b, 0);
+    if (diff !== 0) {
+      const key = Object.entries(scaled).sort((a, b) => b[1] - a[1])[0][0]; // 가장 큰 항목에 보정
+      (scaled as any)[key] += diff;
+    }
+    return scaled;
+  };
+
+  const to100 = <T extends Record<string, number>>(o: T): T => {
+    const s = Object.values(o).reduce((a,b)=>a+b,0) || 1;
+    return Object.fromEntries(
+      Object.entries(o).map(([k,v]) => [k, Math.round((v/s)*100)])
+    ) as T;
+  };
+
+  // --- 초기값(합 100) ---
+  const INIT_WEIGHTS: Weights = normalizeToTotal(DEFAULT_WEIGHTS, 100);
+  const INIT_SUBWEIGHTS: SubWeights = {
+    food:       to100(DEFAULT_SUB_WEIGHTS.food),
+    transport:  to100(DEFAULT_SUB_WEIGHTS.transport),
+    education:  to100(DEFAULT_SUB_WEIGHTS.education),
+    amenities:  to100(DEFAULT_SUB_WEIGHTS.amenities),
+    medical:    to100(DEFAULT_SUB_WEIGHTS.medical),
+    delivery:   to100(DEFAULT_SUB_WEIGHTS.delivery),
+  };
+
+  const renormParentsForActive = React.useCallback(
+    (w: Weights, keys: MetricKey[]): Weights => {
+      const act = keys.length ? keys : METRIC_KEYS;
+      const baseSum = act.reduce((acc, k) => acc + (w[k] || 0), 0) || 1;
+
+      const next: Weights = { ...w };
+      METRIC_KEYS.forEach(k => {
+        next[k] = act.includes(k) ? Math.round(((w[k] || 0) * 100) / baseSum) : 0;
+      });
+
+      // 반올림 오차 보정
+      const sumAct = act.reduce((acc,k)=>acc + next[k], 0);
+      const diff = 100 - sumAct;
+      if (diff !== 0) {
+        const maxK = [...act].sort((a,b)=>(w[b]||0)-(w[a]||0))[0];
+        next[maxK] += diff;
+      }
+      return next;
+    },
+    []
+  );
+
+  // --- 기존 두 줄을 이걸로 교체 ---
+  const [weights, setWeights] = useState<Weights>(() => INIT_WEIGHTS);
+  const [subWeights, setSubWeights] = useState<SubWeights>(() => INIT_SUBWEIGHTS);
+
+  // 처음 1회
+  useEffect(() => {
+    setWeights(prev => renormParentsForActive(prev, activeKeys));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // activeKeys 바뀔 때마다
+  useEffect(() => {
+    setWeights(prev => renormParentsForActive(prev, activeKeys));
+  }, [activeKeys, renormParentsForActive]);
+
+  const handlePickServer = async (p: ServerPoint) => {
+    // 우측 카드의 주소/이름은 역지오 유지
+    try {
+      const res = await fetch(`/api/revgeo?lat=${p.lat}&lng=${p.lng}`, { cache: 'no-store' });
+      const j = await res.json();
+
+      setSelected(prev => ({
+        ...prev,
+        lat: p.lat,
+        lng: p.lng,
+        name: j.dong ? `${j.gu} ${j.dong}` : prev.name,
+        address: j.address ?? prev.address,
+      }));
+    } catch {
+      setSelected(prev => ({ ...prev, lat: p.lat, lng: p.lng }));
+    }
+
+    // 마커가 이미 점수를 들고 있으므로 즉시 실제 점수 반영
+    setRdsDetail({
+      food: Math.round(p.score ?? 0),
+      medical_lv2: Math.round(p.medical_lv2 ?? 0),
+      medical_lv3: Math.round(p.medical_lv3 ?? 0),
+    });
+  };
+
+  useEffect(() => {
+    // 선택 좌표 중심으로 반경 범위 bbox 생성(너무 넓지 않게 반경의 절반 사용)
+    const meters = RADIUS_METERS[radius] / 2;
+    const [w, s, e, n] = bboxFromCenter(selected.lat, selected.lng, meters);
+    const zoom = ZOOM_BY_RADIUS[radius];
+    const url = `/api/scores?bbox=${w},${s},${e},${n}&zoom=${zoom}`;
+
+    let aborted = false;
+    (async () => {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        const raw = await res.json();
+        const list = normalizeScoresPayload(raw);
+
+        // 가장 가까운 포인트 1개 선택
+        let nearest: ServerPoint | null = null;
+        let best = Number.POSITIVE_INFINITY;
+        for (const it of list) {
+          if (typeof it.lat !== 'number' || typeof it.lng !== 'number') continue;
+          const d2 = (it.lat - selected.lat) ** 2 + (it.lng - selected.lng) ** 2;
+          if (d2 < best) { best = d2; nearest = it; }
+        }
+
+        if (!aborted) {
+          if (nearest) {
+            setRdsDetail({
+              food: Math.round(nearest.score ?? 0),
+              medical_lv2: Math.round(nearest.medical_lv2 ?? 0),
+              medical_lv3: Math.round(nearest.medical_lv3 ?? 0),
+            });
+          } else {
+            // 범위 내 점이 없으면 0 처리
+            setRdsDetail({ food: 0, medical_lv2: 0, medical_lv3: 0 });
+          }
+        }
+      } catch {
+        if (!aborted) setRdsDetail({ food: 0, medical_lv2: 0, medical_lv3: 0 });
+      }
+    })();
+
+    return () => { aborted = true; };
+  }, [selected.lat, selected.lng, radius]);
+
+
+  /* === UI용 카테고리 점수(없으면 0 처리) === */
+  // 1) uiScores를 Partial로(없는 건 undefined로 남김)
+  const uiScores: Partial<Record<MetricKey, number>> = useMemo(() => {
+    if (!rdsDetail) return {};
+    const out: Partial<Record<MetricKey, number>> = {};
+
+    if (typeof rdsDetail.food === 'number') out.food = Math.round(rdsDetail.food);
+
+    const m2 = rdsDetail.medical_lv2;
+    const m3 = rdsDetail.medical_lv3;
+    if (typeof m2 === 'number' || typeof m3 === 'number') {
+      const vals = [m2, m3].filter((v): v is number => typeof v === 'number');
+      const avg = Math.round(vals.reduce((a,b)=>a+b,0) / (vals.length || 1));
+      out.medical = avg;
+    }
+    return out;
+  }, [rdsDetail]);
+
+  // 2) 실제 계산에 쓸 점수 병합
+  const mergedScores = useMemo(() => {
+    const base = selected.scores[radius];
+
+    // medical: (종합/대학) 자식 비율로 가중 평균
+    let medicalFromChildren: number | undefined = undefined;
+    if (rdsDetail) {
+      const vs: number[] = [];
+      const ws: number[] = [];
+      if (typeof rdsDetail.medical_lv2 === 'number') {
+        vs.push(rdsDetail.medical_lv2);
+        ws.push(subWeights.medical.general ?? 0);     // 자식 비율
+      }
+      if (typeof rdsDetail.medical_lv3 === 'number') {
+        vs.push(rdsDetail.medical_lv3);
+        ws.push(subWeights.medical.university ?? 0);  // 자식 비율
+      }
+      medicalFromChildren = mixByWeights(vs, ws);
+    }
+
+    // food 등도 세부 자료가 생기면 동일 패턴으로 계산해서 덮어쓰기
+
+    return {
+      ...base,
+      ...(uiScores.food    !== undefined ? { food: uiScores.food } : {}),
+      ...(medicalFromChildren !== undefined ? { medical: medicalFromChildren } : {}),
+    } as Record<MetricKey, number>;
+  }, [selected, radius, uiScores, rdsDetail, subWeights]);
+
+  const handleSearch = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-
     const q = query.trim();
     if (!q) return;
-
-    // 이름이나 주소에 검색어가 포함된 첫 번째 위치 찾기
-    const match = mockLocations.find(
-      (loc) =>
-        loc.name.includes(q) ||
-        loc.address.includes(q)
-    );
-
-    if (match) {
-      setSelected(match);   // 선택 지역 바꾸기 → 지도 & 오른쪽 카드가 같이 바뀜
+    const res = await fetch(`/api/address/search?q=${encodeURIComponent(q)}`, { cache: 'no-store' });
+    const data = await res.json();
+    const d: AddressDetail | null = data.items?.[0] ?? null;
+    if (d) {
+      setDetail(d);
+      // 지도 중심/선택 갱신 (오른쪽 카드 상단 주소도 갱신)
+      setSelected(prev => ({
+        ...prev,
+        lat: d.lat, lng: d.lng,
+        name: d.dong ?? d.gu ?? '선택 주소',
+        address: d.full_road_address,
+      }));
       setSearchError('');
     } else {
-      setSearchError('검색 결과가 없습니다. (예: 강남구, 종로구, 중구)');
+      setSearchError('검색 결과가 없습니다.');
     }
   };
 
-  const selectedScore = useMemo(() => selected.scores[radius], [selected, radius]);
-  const selectedWeighted = useMemo(() => weightedScore(selectedScore, weights), [selectedScore, weights]);
+  // 슬라이더는 가공 없는 weights 그대로 사용
+  const uiWeights = weights;
 
+  // 비선택 키 0으로 마스킹
+  const maskedUi = useMemo(() => {
+    const out = { ...uiWeights };
+    METRIC_KEYS.forEach(k => { if (!activeKeys.includes(k)) out[k] = 0; });
+    return out;
+  }, [uiWeights, activeKeys]);
 
-  const ranking = useMemo(() => {
-    return [...mockLocations]
-      .map((loc) => ({ loc, score: weightedScore(loc.scores[radius], weights) }))
-      .sort((a, b) => b.score - a.score);
-  
-  }, [radius, weights]);
+  // 계산 직전에만 100% 정규화
+  const normWeights = useMemo(() => normalizeTo100(maskedUi), [maskedUi, normalizeTo100]);
 
-  const averages = useMemo(() => {
-    const sum: Record<MetricKey, number> = { safety: 0, amenities: 0, food: 0, culture: 0, accessibility: 0 };
-    mockLocations.forEach((l) => {
-      const s = l.scores[radius];
-      (Object.keys(s) as MetricKey[]).forEach((k) => { sum[k] += s[k]; });
-    });
-    const avg: Record<MetricKey, number> = { safety: 0, amenities: 0, food: 0, culture: 0, accessibility: 0 };
-    (Object.keys(sum) as MetricKey[]).forEach((k) => (avg[k] = Math.round(sum[k] / mockLocations.length)));
-    return avg;
-  }, [radius]);
+  // 점수/랭킹 계산은 normWeights로
+  const overall = useMemo(() => weightedScore(mergedScores, normWeights), [mergedScores, normWeights]);
+  const ranking = useMemo(
+    () => [...mockLocations]
+          .map((loc) => ({ loc, score: weightedScore(loc.scores[radius], normWeights) }))
+          .sort((a, b) => b.score - a.score),
+    [radius, normWeights]
+  );
+
+  const handleRemoveActive = (key: MetricKey) => {
+    setActiveKeys(prev => prev.filter(k => k !== key)); // 후보로 되돌아감
+  };
+
+  // 초기 로드
+  React.useEffect(() => {
+    const ps = loadPresets();        // 유틸 없이 직접 localStorage.getItem(...) 써도 됨
+    setPresets(ps);
+  }, []);
+
+  // 변경 사항 자동 저장
+  React.useEffect(() => { savePresets(presets); }, [presets]);
+
+  // 저장(신규)
+  const savePreset = (name: string) => {
+    const id = (crypto?.randomUUID?.() ?? String(Date.now()));
+    const p: WeightPreset = {
+      id, name: name || `프리셋 ${presets.length + 1}`,
+      weights: JSON.parse(JSON.stringify(weights)),
+      subWeights: JSON.parse(JSON.stringify(subWeights)),
+      radius,
+      createdAt: Date.now(),
+      version: 1,
+    };
+    setPresets(prev => [p, ...prev]);
+    setActivePresetId(id);
+  };
+
+  // 덮어쓰기(현재 선택 프리셋)
+  const overwritePreset = () => {
+    if (!activePresetId) return;
+    setPresets(prev => prev.map(p =>
+      p.id === activePresetId
+        ? { ...p,
+            name: presetName || p.name,
+            weights: JSON.parse(JSON.stringify(weights)),
+            subWeights: JSON.parse(JSON.stringify(subWeights)),
+            radius }
+        : p
+    ));
+  };
+
+  // 적용(불러오기)
+  const applyPreset = (id: string) => {
+    const p = presets.find(x => x.id === id);
+    if (!p) return;
+
+    setWeights(JSON.parse(JSON.stringify(p.weights)));
+    setSubWeights(JSON.parse(JSON.stringify(p.subWeights)));
+    if (p.radius) setRadius(p.radius);
+
+    // 프리셋의 표시 카테고리 = 가중치가 0보다 큰 것
+    const visible = METRIC_KEYS.filter(k => (p.weights[k] ?? 0) > 0);
+    setActiveKeys(visible);
+
+    setActivePresetId(id);
+    setPresetName(p.name);
+  };
+
+  // 삭제
+  const deletePreset = () => {
+    if (!activePresetId) return;
+    setPresets(prev => prev.filter(p => p.id !== activePresetId));
+    setActivePresetId(null);
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white text-slate-900">
-      {/* HERO */}
-      <header className="py-20 md:py-28">
-        <div className="container mx-auto max-w-6xl px-4 text-center">
-          <div className="mx-auto w-12 h-12 rounded-full bg-slate-900/90 text-white flex items-center justify-center mb-5">📍</div>
-          <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight">동네 지표</h1>
-          <p className="mt-4 max-w-2xl mx-auto text-lg text-slate-500">데이터 기반으로 지역을 분석하고, 나만의 기준으로 최적의 장소를 찾아보세요</p>
-          <div className="mt-8 flex items-center justify-center gap-3">
-            <a href="#map" className="px-5 py-3 rounded-xl bg-slate-900 text-white font-medium shadow hover:bg-slate-800 inline-flex">
-              지도 분석 시작하기 ▾
-            </a>
-            <a href="#category" className="px-5 py-3 rounded-xl border font-medium bg-white shadow-sm inline-flex">
-              자세히 알아보기
-            </a>
-          </div>
-          <div className="mt-12 grid grid-cols-3 gap-6">
-            <Stat value="20만+" label="서울시 주소 데이터" />
-            <Stat value="5개" label="맞춤 분석 카테고리" />
-            <Stat value="4개" label="반경별 상세 분석" />
-          </div>
-        </div>
-      </header>
+    <div className="relative h-screen w-screen">
+      {/* 지도: 화면 전체 고정 */}
+      <div className="fixed inset-0">
+        <MapView
+          locations={mockLocations}
+          selected={selected}
+          radius={radius}
+          weights={weights}
+          onSelect={setSelected}
+          onRadiusChange={setRadius}
+          onPickServer={handlePickServer}
+        />
+      </div>
 
-      {/* 핵심 분석 카테고리 */}
-      <section id="category" className="py-16 scroll-mt-24">
-        <div className="container mx-auto max-w-6xl px-4">
-          <SectionTitle title="핵심 분석 카테고리" />
-          <div className="grid md:grid-cols-3 gap-6">
-            {([
-              { k: 'safety' as MetricKey, desc: '범죄지수 및 치안 데이터 분석' },
-              { k: 'amenities' as MetricKey, desc: '편의점, 마트 등 생활편의 시설' },
-              { k: 'food' as MetricKey, desc: '다양한 음식점 및 카페 밀집도' },
-              { k: 'culture' as MetricKey, desc: '문화시설, 여가 공간 분포' },
-              { k: 'accessibility' as MetricKey, desc: '대중교통 및 주요 시설 접근성' },
-            ]).map((m) => (
-              <div key={m.k} className="rounded-2xl border bg-white p-6 shadow-sm">
-                <div className="text-sm text-slate-500">카테고리</div>
-                <div className="mt-1 flex items-center gap-2">
-                  <span className="text-lg" aria-hidden>{METRIC_ICON[m.k]}</span>
-                  <div className="font-semibold">{METRIC_LABEL[m.k]}</div>
-                </div>
-                <p className="mt-3 text-slate-600">{m.desc}</p>
+      {/* 좌상단 툴바(검색/반경) */}
+      <div className="fixed left-20 md:left-24 top-4 z-30 flex flex-col gap-3">
+        <form onSubmit={handleSearch} className="flex items-center rounded-xl bg-white/90 shadow px-3 py-2 backdrop-blur">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="지역 검색 (예: 강남구)"
+            className="w-56 md:w-72 bg-transparent outline-none text-sm"
+          />
+          <button className="ml-2 text-sm px-3 py-1 rounded-lg bg-slate-900 text-white">검색</button>
+        </form>
+      </div>
+
+      {/* 우측 패널(슬라이더/랭킹 탭) */}
+      <aside className="fixed right-4 top-4 bottom-4 z-30 w-[340px] md:w-[420px] rounded-2xl bg-white/95 shadow-xl backdrop-blur overflow-y-auto">
+        {/* 패널 헤더: 선택 지역 요약 */}
+        <div className="p-5 border-b">
+          <div className="text-xs text-slate-500">선택 지역</div>
+          <div className="mt-1 text-lg font-semibold">{selected.name}</div>
+          <div className="text-xs text-slate-500">{selected.address}</div>
+          <div className="mt-4 flex items-end justify-between">
+            <div>
+              <div className="text-xs text-slate-500 mb-1">종합 생활 점수</div>
+              <div className="text-4xl font-bold" style={{ color: colorByScore(overall) }}>
+                {overall} <span className="text-base text-slate-400">/ 100</span>
               </div>
-            ))}
-          </div>
-          <div className="mt-12 text-center">
-            <div className="text-slate-600 mb-4">다양한 활용 분야</div>
-            <div className="flex flex-wrap justify-center gap-6">
-              {['주거지 선택', '상권 분석', '부동산 투자', '도시 계획', '여행지 선택', '입지 분석'].map((t) => (
-                <Chip key={t} variant="filled" size="lg">{t}</Chip>
-              ))}
             </div>
+            <Chip>{radius}</Chip>
           </div>
         </div>
-      </section>
 
-      {/* 인터랙티브 지역 지도 */}
-      <section className="py-16">
-        <div className="container mx-auto max-w-6xl px-4">
-          <SectionTitle title="인터랙티브 지역 지도" subtitle="서울시 주요 지역을 클릭하여 상세 정보를 확인하세요" />
-          <form onSubmit={handleSearch} className="mt-4 mb-4 flex flex-col gap-2 md:flex-row md:items-center">
-            <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="예: 강남구, 종로구, 중구..." className="flex-1 rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/80"/>
-            <button type="submit" className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">
-              검색
+        {/* 탭 전환 */}
+        <div className="px-5 pt-3">
+          <div className="inline-flex rounded-xl border bg-white p-1">
+            <button
+              onClick={() => setTab('weights')}
+              className={`px-4 py-1.5 rounded-lg text-sm ${tab === 'weights' ? 'bg-slate-900 text-white' : ''}`}
+            >
+              가중치
             </button>
-          </form>
-
-          {searchError && (
-            <p className="mb-4 text-sm text-red-500">{searchError}</p>
-          )}
-          <div id="map" className="grid md:grid-cols-2 gap-6 items-start scroll-mt-24 md:scroll-mt-28">
-            <div className="rounded-2xl border shadow-sm overflow-hidden bg-white">
-              <MapView locations={mockLocations} selected={selected} radius={radius} weights={weights} onSelect={setSelected} />
-            </div>
-            <div className="rounded-2xl border shadow-sm bg-white p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm text-slate-500">선택 지역</div>
-                  <h3 className="text-xl font-semibold mt-1">{selected.name}</h3>
-                  <div className="text-slate-500 text-sm">{selected.address}</div>
-                </div>
-                <Chip>{radius}</Chip>
-              </div>
-              <div className="mt-6 grid grid-cols-2 gap-4">
-                {(Object.keys(selectedScore) as MetricKey[]).map((k) => (
-                  <div key={k} className="rounded-xl border p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base" aria-hidden>{METRIC_ICON[k]}</span>
-                        <div className="text-sm text-slate-600">{METRIC_LABEL[k]}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[11px] leading-none text-slate-400">
-                          {percentileByScore(selectedScore[k])}
-                        </div>
-                        <div className="text-lg font-semibold" style={{ color: colorByScore(selectedScore[k]) }}>
-                          {selectedScore[k]}점
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-6">
-                <div className="text-sm text-slate-500 mb-2">종합 생활 점수</div>
-                <div className="text-5xl font-bold">
-                  {selectedWeighted} <span className="text-2xl text-slate-400">/ 100</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* 반경 선택 */}
-          <div className="mt-8 rounded-2xl border bg-white shadow-sm p-6">
-            <div className="text-sm font-medium mb-3">분석 반경 선택</div>
-            <RadiusControl value={radius} onChange={setRadius} />
-            <p className="mt-2 text-sm text-slate-500">선택한 반경 내의 생활 인프라를 분석합니다</p>
-          </div>
-
-          {/* 반경별 비교 + 범례 */}
-          <div className="mt-6 grid md:grid-cols-2 gap-6">
-            <div className="rounded-2xl border bg-white p-6 shadow-sm">
-              <div className="font-medium mb-3">반경별 비교</div>
-              <div className="space-y-3">
-                {RADIUS_LIST.map((r) => {
-                  const sc = weightedScore(selected.scores[r], weights);
-                  const active = r === radius;
-                  return (
-                    <div key={r} className={`flex items-center justify-between rounded-xl border p-4 ${active ? 'ring-2 ring-slate-900/80' : ''}`}>
-                      <div>{r}</div>
-                      <div className="font-semibold" style={{ color: colorByScore(sc) }}>
-                        {sc}점
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            <div className="rounded-2xl border bg-white p-6 shadow-sm">
-              <div className="font-medium mb-3">점수 범례</div>
-              <div className="grid grid-cols-2 gap-4">
-                {SCORE_LEGEND.map(v => (
-                  <div key={v.key} className="flex items-center gap-3">
-                    <span className="w-3 h-3 rounded-full" style={{ background: v.color }} />
-                    <div>
-                      <div className="font-medium">{v.range}</div>
-                      <div className="text-sm text-slate-500">{v.label}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <button
+              onClick={() => setTab('ranking')}
+              className={`px-4 py-1.5 rounded-lg text-sm ${tab === 'ranking' ? 'bg-slate-900 text-white' : ''}`}
+            >
+              랭킹
+            </button>
           </div>
         </div>
-      </section>
 
-      {/* 맞춤형 지역 분석 */}
-      <section className="py-16 bg-slate-50/70">
-        <div className="container mx-auto max-w-6xl px-4">
-          <SectionTitle title="맞춤형 지역 분석" subtitle="가중치를 조정하여 나만의 기준으로 지역을 평가해보세요" />
-          <div className="grid lg:grid-cols-3 gap-6">
-            <div className="rounded-2xl border bg-white p-6 shadow-sm">
-              <WeightSliders weights={weights} setWeights={setWeights} />
-              <div className="mt-3 flex gap-2">
-                <button className="px-3 py-2 rounded-lg border" onClick={() => setWeights({ ...DEFAULT_WEIGHTS })}>가중치 초기화</button>
-                <button className="px-3 py-2 rounded-lg border" onClick={() => setWeights({ safety: 40, amenities: 20, food: 15, culture: 10, accessibility: 15 })}>예: 안전 중시</button>
+        {/* 탭 내용 */}
+        <div className="p-5">
+          {tab === 'weights' ? (
+            <>
+              {/* [NEW] 프리셋 바 */}
+              <div className="mb-4 rounded-2xl border bg-white/95 p-3 shadow-sm sticky top-0 z-10 backdrop-blur">
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={activePresetId ?? ''}
+                      onChange={(e) => {
+                        const id = e.target.value || null;
+                        setActivePresetId(id);
+                        if (id) {
+                          const p = presets.find(pp => pp.id === id);
+                          setPresetName(p?.name ?? '나의 프리셋');
+                        }
+                      }}
+                      className="flex-1 rounded-lg border px-2 py-1 text-sm"
+                    >
+                      <option value="">(선택된 프리셋 없음)</option>
+                      {presets.map(p => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} {p.radius ? `· ${p.radius}` : '' }
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => applyPreset(activePresetId as string)}
+                      disabled={!activePresetId}
+                      className="rounded-lg border px-3 py-1 text-sm disabled:opacity-40"
+                    >
+                      불러오기
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deletePreset}
+                      disabled={!activePresetId}
+                      className="rounded-lg border px-3 py-1 text-sm disabled:opacity-40"
+                    >
+                      삭제
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={presetName}
+                      onChange={(e) => setPresetName(e.target.value)}
+                      placeholder="프리셋 이름"
+                      className="flex-1 rounded-lg border px-2 py-1 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => savePreset(presetName)}
+                      className="rounded-lg border px-3 py-1 text-sm"
+                    >
+                      새로 저장
+                    </button>
+                    <button
+                      type="button"
+                      onClick={overwritePreset}
+                      disabled={!activePresetId}
+                      className="rounded-lg border px-3 py-1 text-sm disabled:opacity-40"
+                    >
+                      덮어쓰기
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-            <ScoreCard location={selected} radius={radius} weights={weights} />
-            <div className="rounded-2xl border bg-white p-6 shadow-sm">
-              <div className="font-semibold mb-4">지역 순위 <span className="text-slate-400 ml-1 text-sm">(설정한 가중치 기준)</span></div>
+              {/* 카테고리 피커(드래그&드롭) */}
+              <div className="mb-4">
+                <div className="text-xs font-semibold text-slate-500 mb-2">카테고리 선택</div>
+                <CategoryPicker
+                  selected={activeKeys}
+                  allKeys={METRIC_KEYS}
+                  onChange={(next) => setActiveKeys(next.length ? next : activeKeys)}
+                />
+              </div>
+
+              {/* 점수 카드: 선택된 것만 렌더 */}
+              <div className="grid grid-cols-1 gap-3 mb-5">
+                {activeKeys.length === 0 ? (
+                  <div className="rounded-xl border p-4 text-slate-500 text-sm">
+                    선택된 카테고리가 없습니다. 위에서 드래그하여 추가하세요.
+                  </div>
+                ) : (
+                  activeKeys.map((k) => {
+                    const v = Math.round(mergedScores[k] ?? 0);
+                    const opened = expandedKey === k;
+                    return (
+                      <div key={k} className="space-y-2"> {/* [ADD] 상세행을 붙이기 위해 감쌈 */}
+                        {/* [CHANGE] 카드 자체를 버튼처럼 동작 */}
+                        <div
+                          role="button"
+                          aria-expanded={opened}
+                          onClick={() => setExpandedKey(prev => (prev === k ? null : k))}
+                          className={`flex items-center justify-between rounded-2xl border p-5 shadow-sm min-h-[96px] cursor-pointer
+                                    ${opened ? 'ring-2 ring-slate-900/10' : ''}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-xl" aria-hidden>{METRIC_ICON[k]}</span>
+                            <div>
+                              <div className="font-semibold">{METRIC_LABEL[k]}</div>
+                              <div className="text-xs text-slate-500">{percentileByScore(v)}</div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="text-2xl font-bold" style={{ color: colorByScore(v) }}>
+                              {v}<span className="text-sm text-slate-400 ml-1">점</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveActive(k)}
+                              className="text-xs rounded-md border px-2 py-1 hover:bg-slate-50"
+                              aria-label={`${METRIC_LABEL[k]} 제거`}
+                            >
+                              제거
+                            </button>
+                          </div>
+                        </div>
+                        {opened && <DetailRows metric={k} rds={rdsDetail} />}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              {/* 가중치 슬라이더: 선택된 것만 표시/정규화 */}
+              <WeightSliders
+                weights={weights}
+                setWeights={setWeights}
+                subWeights={subWeights}
+                setSubWeights={setSubWeights}
+                activeKeys={activeKeys}
+                syncChildrenOnParent={false}
+                expandedKey={expandedKey}
+                onToggle={(k) => setExpandedKey(prev => (prev === k ? null : k))}
+              />
+            </>
+          ) : (
+            // 랭킹 그대로 (maskedWeights로 이미 반영됨)
+            <div>
+              <div className="text-sm font-semibold mb-3">
+                지역 순위 <span className="text-slate-400 ml-1">(선택한 카테고리 + 가중치 기준)</span>
+              </div>
               <RankingList items={ranking} selectedId={selected.id} onPick={setSelected} />
             </div>
-          </div>
-
-
-          {/* 카테고리별 전체 평균 */}
-          <div className="mt-8 rounded-2xl border bg-white p-6 shadow-sm">
-            <div className="font-semibold mb-4">카테고리별 전체 평균</div>
-            <div className="space-y-4">
-              {(Object.keys(averages) as MetricKey[]).map((k) => (
-                <div key={k}>
-                  <div className="flex items-center justify-between text-sm">
-                    {/* 아이콘 + 라벨 */}
-                    <div className="flex items-center gap-2">
-                      <span className="text-base" aria-hidden>{METRIC_ICON[k]}</span>
-                      <span>{METRIC_LABEL[k]}</span>
-                    </div>
-                    <div className="font-medium">{averages[k]}점</div>
-                  </div>
-
-                  <div className="mt-1 h-3 w-full rounded-full bg-slate-200 overflow-hidden">
-                    <div
-                      className="h-full"
-                      style={{
-                        width: `${averages[k]}%`,
-                        background: colorByScore(averages[k]),
-                      }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
-      </section>
-
-      {/* 푸터 */}
-      <footer className="border-t py-12">
-        <div className="container mx-auto max-w-6xl px-4 grid md:grid-cols-3 gap-8">
-          <div>
-            <div className="font-semibold">지역 생활 점수 지도</div>
-            <div className="text-slate-500 mt-1">데이터 기반 지역 분석 서비스</div>
-          </div>
-          <div>
-            <div className="font-semibold">프로젝트 정보</div>
-            <div className="text-slate-500 mt-1">Team 4 · 2025년 프로젝트 · 서울시 데이터 기반</div>
-          </div>
-          <div>
-            <div className="font-semibold">데이터 출처</div>
-            <div className="text-slate-500 mt-1">OpenStreetMap, Kakao Local API, 공공 데이터 포탈, 행정안전부 API</div>
-          </div>
-        </div>
-        <div className="mt-8 text-center text-slate-400 text-sm">© 2025 지역 생활 점수 지도 – Team 4. All rights reserved.</div>
-      </footer>
+      </aside>
     </div>
   );
 }

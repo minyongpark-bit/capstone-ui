@@ -1,8 +1,17 @@
-import type { MetricKey, ScoresByMetric, Weights } from './types';
-
+import type { ScoresByMetric, Weights } from './types';
+import { METRIC_KEYS } from './constants';
 
 export function weightedScore(metrics: ScoresByMetric, weights: Weights): number {
-    const wsum = Object.values(weights).reduce((a, b) => a + b, 0) || 1;
-    const total = (Object.keys(metrics) as MetricKey[]).reduce((s, k) => s + metrics[k] * weights[k], 0);
-    return Math.round(total / wsum);
+  let total = 0;
+  let wsum = 0;
+
+  for (const k of METRIC_KEYS) {
+    const w = weights[k] ?? 0;
+    const v = metrics[k] ?? 0;   // 없으면 0으로
+    if (w > 0) {
+      total += v * w;
+      wsum  += w;
+    }
+  }
+  return wsum ? Math.round(total / wsum) : 0;
 }

@@ -9,7 +9,7 @@ type Props = { location: Location; radius: RadiusKey; weights: Weights };
 export default function ScoreCard({ location, radius, weights }: Props) {
   const metrics = location.scores[radius];
   const overall = weightedScore(metrics, weights);
-  const keys = Object.keys(metrics) as MetricKey[];
+  const keys = (Object.keys(metrics) as MetricKey[]).filter(k => (weights[k] ?? 0) > 0);
 
   return (
     <div className="rounded-2xl border bg-white p-6 shadow-sm">
